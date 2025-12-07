@@ -7,6 +7,7 @@ package component
 import (
 	"bus/go_notifyhub/internal/core"
 	"bus/go_notifyhub/internal/service"
+	"fmt"
 	"sync"
 )
 
@@ -76,4 +77,24 @@ func (hm *HubManager) Get(resourceType string) interface{} {
 	default:
 		return map[string]string{"error": "Unknown resource type: " + resourceType}
 	}
+}
+
+// Link connects a Publisher to an Observer and updates the Graph
+func (hm *HubManager) Link(pubID, obsID string) error {
+	hm.mu.RLock()
+	pub, pubOk := hm.Publishers[pubID]
+	obs, obsOk := hm.Observers[obsID]
+	hm.mu.RUnlock()
+
+	if !pubOk || !obsOk {
+		return fmt.Errorf("publisher or observer not found")
+	}
+
+	// 1. Update the Execution Logic (The Publisher)
+	pub.Subscribe(obs)
+
+	// 2. Update the Visualization (The Graph)
+	hm.Graph.AddEdge(pubID, obsID)
+
+	return nil
 }

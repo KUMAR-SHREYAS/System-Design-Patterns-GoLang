@@ -23,6 +23,11 @@ func (lc *LoadController) InitLoad(c *gin.Context) {
 	o1 := core.NewObserver("obs-1")
 	lc.hubManager.RegisterObserver(o1)
 
-	p1.Subscribe(o1)
+	// 2. Link them using the Manager (Updates Graph + Publisher)
+	err := lc.hubManager.Link("pub-1", "obs-1")
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(200, gin.H{"message": "Load initialized: pub-1 -> obs-1"})
 }

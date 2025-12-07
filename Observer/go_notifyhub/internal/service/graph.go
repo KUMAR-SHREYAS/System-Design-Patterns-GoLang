@@ -11,6 +11,7 @@ package service
 // func (g *Graph) ActiveObservers(pubID string) []*core.Observer
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 )
@@ -25,6 +26,15 @@ func NewGraph() *Graph {
 	return &Graph{
 		nodes: make(map[string][]string),
 	}
+}
+
+// MarshalJSON is automatically called by Gin/JSON when you return the object.
+func (g *Graph) MarshalJSON() ([]byte, error) {
+	g.mu.RLock() // Lock for reading (Safety)
+	defer g.mu.RUnlock()
+
+	// We simply return the internal map as the JSON representation
+	return json.Marshal(g.nodes)
 }
 
 func (g *Graph) AddEdge(from, to string) {

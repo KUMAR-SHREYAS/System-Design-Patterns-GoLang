@@ -20,7 +20,7 @@ func main() {
 
 	// 3. Gin Router
 	r := gin.Default()
-
+	r.SetTrustedProxies(nil)
 	// 4. Routes
 	apiGroup := r.Group("/api")
 	{
