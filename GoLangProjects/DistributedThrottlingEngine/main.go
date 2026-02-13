@@ -10,6 +10,28 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var slidingWindowLua = redis.NewScript(`
+	local key = KEYS[1]
+	local now = tonumber(ARGV[1])
+	local window_start = tonumber(ARGV[2])
+	local limit = tonumber(ARGV[3])
+	local duration = tonumber(ARGV[4])
+
+	--1 Remove old hits 
+	redis.call("ZREMRANGEBYSCORE", key, 0, window_start)
+
+	--2 Count current hits
+	local count = redis.call("ZCARD", key)
+
+	--3. If under limit, add the new hit
+	if count< limit then
+		redis.call("ZADD", key, now, now)
+		redis.call("EXPIRE", key, duration)
+		return 0 --success
+	else 
+		return 1 -- Limit Reached
+	end
+`)
 var ctx = context.Background()
 var rdb *redis.Client
 
@@ -23,25 +45,25 @@ func rateLimitMiddleware(next http.HandlerFunc, limit int64, duration time.Durat
 			userIp = r.RemoteAddr
 		}
 		limitKey := fmt.Sprintf("%s:%s", userIp, r.URL.Path)
-		// 1. Get current time in Microseconds (high precision)
+		// Get current time in Microseconds (high precision)
 		now := time.Now().UnixMicro()
-		windowStartTime := now -duration.Microseconds()
-		// 2. Remove all hits that are now outside the "sliding" window
-		rdb.ZRemRangeByScore(ctx, limitKey, "0", fmt.Sprintf("%d",windowStartTime))
+		windowStartTime := now - duration.Microseconds()
 
-		// 3. Count how many hits are left in the last X seconds
-		count, _ := rdb.ZCard(ctx, limitKey).Result()
-
-		if count >= limit{
-			http.Error(w, "Sliding window limit reached!", 429)
+		// Execute the Lua Script atomically(all at once and one execution at a time)
+		// KEYS[1] = limitKey
+		// ARGV = now, windowStartTime, limit, duration(in seconds)
+		result, err := slidingWindowLua.Run(ctx, rdb, []string{limitKey},
+			now, windowStartTime, limit, int(duration.Seconds())).Int()
+		if err != nil {
+			fmt.Println("Lua Error:", err)
+			http.Error(w, "Server Error", 500)
 			return
 		}
 
-		rdb.ZAdd(ctx, limitKey, redis.Z{
-			Score: float64(now),
-			Member: now,
-		})
-		rdb.Expire(ctx, limitKey, duration)
+		if result == 1 {
+			http.Error(w, "Atomic Sliding Window Limit Reached!", 429)
+			return
+		}
 		next(w, r)
 	}
 }
