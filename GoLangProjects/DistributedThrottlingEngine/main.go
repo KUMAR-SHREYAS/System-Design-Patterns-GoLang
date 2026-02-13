@@ -9,7 +9,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
-
+var redisHealthy = true
+var lastErrorTime time.Time
 var slidingWindowLua = redis.NewScript(`
 	local key = KEYS[1]
 	local now = tonumber(ARGV[1])
@@ -49,6 +50,15 @@ func rateLimitMiddleware(next http.HandlerFunc, limit int64, duration time.Durat
 		now := time.Now().UnixMicro()
 		windowStartTime := now - duration.Microseconds()
 
+		if !redisHealthy {
+			if time.Since(lastErrorTime) >30*time.Second {
+				redisHealthy = true
+			}else{
+				next(w, r)
+				return 
+			}
+		}
+
 		// Execute the Lua Script atomically(all at once and one execution at a time)
 		// KEYS[1] = limitKey
 		// ARGV = now, windowStartTime, limit, duration(in seconds)
@@ -57,7 +67,9 @@ func rateLimitMiddleware(next http.HandlerFunc, limit int64, duration time.Durat
 		if err != nil {
 			// 1. LOG THE ERROR: So you know Redis is down (Check your terminal)
 			fmt.Printf("REDIS ERROR (Failing Open): %v\n", err)
-
+			redisHealthy = false
+			lastErrorTime = time.Now()
+			fmt.Printf("Circuit Breaker Tripped: %v\n", err)
 			// 2. FAIL OPEN: Call the next handler and exit the middleware
 			// This lets the user see the page even if Redis is dead
 			next(w, r)
