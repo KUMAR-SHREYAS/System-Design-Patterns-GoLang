@@ -55,8 +55,12 @@ func rateLimitMiddleware(next http.HandlerFunc, limit int64, duration time.Durat
 		result, err := slidingWindowLua.Run(ctx, rdb, []string{limitKey},
 			now, windowStartTime, limit, int(duration.Seconds())).Int()
 		if err != nil {
-			fmt.Println("Lua Error:", err)
-			http.Error(w, "Server Error", 500)
+			// 1. LOG THE ERROR: So you know Redis is down (Check your terminal)
+			fmt.Printf("REDIS ERROR (Failing Open): %v\n", err)
+
+			// 2. FAIL OPEN: Call the next handler and exit the middleware
+			// This lets the user see the page even if Redis is dead
+			next(w, r)
 			return
 		}
 
