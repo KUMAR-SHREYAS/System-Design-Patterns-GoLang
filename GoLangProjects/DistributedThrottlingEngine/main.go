@@ -9,6 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
+
 var redisHealthy = true
 var lastErrorTime time.Time
 var slidingWindowLua = redis.NewScript(`
@@ -49,13 +50,13 @@ func rateLimitMiddleware(next http.HandlerFunc, limit int64, duration time.Durat
 		// Get current time in Microseconds (high precision)
 		now := time.Now().UnixMicro()
 		windowStartTime := now - duration.Microseconds()
-
+		// 1. If the "Circuit" is open, skip Redis entirely to save time
 		if !redisHealthy {
-			if time.Since(lastErrorTime) >30*time.Second {
-				redisHealthy = true
-			}else{
+			if time.Since(lastErrorTime) > 30*time.Second {
+				redisHealthy = true // Try to "Half-Open" (simplified here)
+			} else {
 				next(w, r)
-				return 
+				return
 			}
 		}
 
