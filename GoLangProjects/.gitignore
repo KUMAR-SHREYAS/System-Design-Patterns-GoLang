@@ -1,0 +1,6 @@
+# Ignore the temporary binary created by Air
+tmp/
+# Ignore the Air config
+.air.toml
+# Ignore executable files
+*.exe
