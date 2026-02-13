@@ -13,7 +13,7 @@ import (
 var ctx = context.Background()
 var rdb *redis.Client
 
-func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
+func rateLimitMiddleware(next http.HandlerFunc, limit int64, duration time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/favicon.ico" {
 			return
@@ -22,13 +22,14 @@ func rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		if err != nil {
 			userIp = r.RemoteAddr
 		}
-		count, _ := rdb.Incr(ctx, userIp).Result()
+		limitKey := fmt.Sprintf("%s:%s", userIp, r.URL.Path)
+		count, _ := rdb.Incr(ctx, limitKey).Result()
 
 		if count == 1 {
-			rdb.Expire(ctx, userIp, 10*time.Second)
+			rdb.Expire(ctx, limitKey, duration)
 		}
-		if count > 5 {
-			http.Error(w, "Too many requests. Slow down!", http.StatusTooManyRequests)
+		if count > limit {
+			http.Error(w, fmt.Sprintf("Limit reached! Max %d hits per %v", limit, duration), 429)
 			return
 		}
 		next(w, r)
@@ -46,8 +47,8 @@ func main() {
 		Addr: "localhost:6379",
 	})
 
-	http.HandleFunc("/", rateLimitMiddleware(homePage))
-	http.HandleFunc("/login", rateLimitMiddleware(loginPage))
+	http.HandleFunc("/", rateLimitMiddleware(homePage, 10, 30*time.Second))
+	http.HandleFunc("/login", rateLimitMiddleware(loginPage, 3, 1*time.Minute))
 
 	fmt.Println("Server starting at :8080...")
 	http.ListenAndServe(":8080", nil) // spin up the server.
