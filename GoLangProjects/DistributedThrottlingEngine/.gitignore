@@ -1,6 +1,10 @@
-# Ignore the temporary binary created by Air
-tmp/
-# Ignore the Air config
-.air.toml
-# Ignore executable files
+# Binaries for programs and plugins
 *.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# Air temporary binary
+tmp/
