@@ -51,33 +51,31 @@ func main() {
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 	})
-
 	lockKey := "lock:payment_processor"
+	maxRetries := 5
+	retryDelay := 500 * time.Millisecond
+	token := ""
+	success := false
+
+	fmt.Println("🔎 Checking for lock...")
 	// We'll set a short timeout to test the safety logic
-	lockTimeout := 4 * time.Second
+	lockTimeout := 10 * time.Second
 
 	fmt.Println("Attempting to acquire lock...")
 
-	// Try to grab the lock
-	token, success := AcquireLock(rdb, lockKey, lockTimeout)
-
+	for i := 0; i < maxRetries; i++ {
+		token, success = AcquireLock(rdb, lockKey, lockTimeout)
+		if success {
+			break
+		}
+		fmt.Printf("Attempt %d: Lock busy, retrying in %v...\n", i+1, retryDelay)
+		time.Sleep(retryDelay)
+	}
 	if !success {
-		fmt.Println("❌ Busy Try again later.")
+		fmt.Println("❌ Could not acquire lock after multiple attempts. Giving up.")
 		return
 	}
+	defer ReleaseLock(rdb, lockKey, token)
+	fmt.Println("✅ Success! Processing now...")
 
-	// SUCCESS: We own the lock now
-	fmt.Printf("✅ Lock Acquired! Token: %s\n", token)
-	fmt.Println("🚧 Processing... (This will outlast the lock)")
-
-	// Simulate a long task (5 seconds), wil outlast the lock
-	time.Sleep(5 * time.Second)
-
-	// Attempt to release
-	release := ReleaseLock(rdb, lockKey, token)
-	if release {
-		fmt.Println("🔓 Lock released successfully.")
-	} else {
-		fmt.Println("⚠️ Failed to release: Lock already expired or owned by someone else!")
-	}
 }
