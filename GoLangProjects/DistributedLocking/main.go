@@ -104,6 +104,6 @@ func main() {
 		fmt.Println("❌ Failed to acquire Global Lock.")
 	}
 
-	// RunChaosTest()
+	RunChaosTest()
 }
 
