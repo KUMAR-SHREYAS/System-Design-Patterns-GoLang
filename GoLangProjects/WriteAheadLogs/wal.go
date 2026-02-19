@@ -1,0 +1,210 @@
+package WriteAheadLogs
+
+import (
+	"bufio"
+	"context"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+const (
+	syncInterval   = 200 * time.Millisecond
+	segementPrefix = "segment-"
+)
+
+// WAL Structure
+type WAL struct {
+	directory           string
+	currentSegment      *os.File
+	lock                sync.Mutex
+	lastSequenceNo      uint64
+	bufWriter           *bufio.Writer
+	syncTimer           *time.Timer
+	shouldFsync         bool
+	maxFileSize         int64
+	maxSegments         int
+	currentSegmentIndex int
+	ctx                 context.Context
+	cancel              context.CancelFunc
+}
+
+// Initialize a new WAL. If the directory does not exist, it will be created.
+// If the directory exists, the last log segment will be opened and the last
+// sequence number will be read from it.
+// enableFsync enables fsync on the log segment file every time the log flushes.
+// maxFileSize is the maximum size of a log segment file in bytes.
+// maxSegments is the maximum number of log segment files to keep.
+func OpenWal(directory string, enableFsync bool, maxFileSize int64, maxSegments int) (*WAL, error) {
+	//Create the directory if it doesn't exist
+	if err := os.Mkdir(directory, 0755); err != nil {
+		return nil, err
+	}
+
+	// Get the list of log segment files in the directory
+	files, err := filepath.Glob(filepath.Join(directory, segementPrefix+"*"))
+	if err != nil {
+		return nil, err
+	}
+
+	var lastSegmentID int
+	if len(files) > 0 {
+		// Find the last segment ID
+		lastSegmentID, err = findLastSegmentIndexinFiles(files)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Create the first log segment
+		file, err := createSegmentFile(directory, 0)
+		if err != nil {
+			return nil, err
+		}
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+	}
+	// Open the last log segement file
+	filePath := filepath.Join(directory, fmt.Sprintf("%s%d", segementPrefix, lastSegmentID))
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	// Seek to the end of the file
+	if _, err = file.Seek(0, io.SeekEnd); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	wal := &WAL{
+		directory:           directory,
+		currentSegment:      file,
+		lastSequenceNo:      0,
+		bufWriter:           bufio.NewWriter(file),
+		syncTimer:           time.NewTimer(syncInterval),
+		shouldFsync:         enableFsync,
+		maxFileSize:         maxFileSize,
+		maxSegments:         maxSegments,
+		currentSegmentIndex: lastSegmentID,
+		ctx:                 ctx,
+		cancel:              cancel,
+	}
+
+	if wal.lastSequenceNo, err = wal.getLastSequenceNo(); err != nil {
+		return nil, err
+	}
+	go wal.keepSyncing()
+	return wal, nil
+}
+
+// resetTimer resets the synchronization timer.
+func (wal *WAL) resetTimer() {
+	wal.syncTimer.Reset((syncInterval))
+}
+
+// Writes out any data in the WAL's in-memory buffer to the segment file. If
+// fsync is enabled, it also calls fsync on the segment file. It also resets
+// the synchronization timer.
+func (wal *WAL) Sync() error {
+	if err := wal.bufWriter.Flush(); err != nil {
+		return err
+	}
+	if wal.shouldFsync {
+		if err := wal.currentSegment.Sync(); err != nil {
+			return err
+		}
+	}
+	//Reset the keepSyncing timer, since we just synced.
+	wal.resetTimer()
+	return nil
+}
+
+func (wal *WAL) keepSyncing() {
+	for {
+		select {
+		case <-wal.syncTimer.C:
+			wal.lock.Lock()
+			err := wal.Sync()
+			wal.lock.Unlock()
+
+			if err != nil {
+				log.Printf("Error while performing sync: %v", err)
+			}
+		case <-wal.ctx.Done():
+			return
+		}
+	}
+}
+
+func (wal *WAL) getLastSequenceNo() (uint64, error) {
+	entry, err := wal.getLastEntryInLog()
+	if err != nil {
+		return 0, err
+	}
+	if entry != nil {
+		return entry.GetLogSequenceNumber(), nil
+	}
+	return 0, nil
+}
+
+// getLastEntryInLog iterates through all the entries of the log and returns the
+// last entry.
+func (wal *WAL) getLastEntryInLog() (*WAL_Entry, error) {
+	file, err := os.OpenFile(wal.currentSegment.Name(), os.O_RDONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var previousSize int32
+	var offset int64
+	var entry *WAL_Entry
+
+	for {
+		var size int32
+		if err := binary.Read(file, binary.LittleEndian, &size); err != nil {
+			if err == io.EOF {
+				// End of file reached, read the last entry at the saved offset.
+				if offset == 0 {
+					return entry, nil
+				}
+
+				if _, err := file.Seek(offset, io.SeekStart); err != nil {
+					return nil, err
+				}
+
+				// Read the entry data
+				data := make([]byte, previousSize)
+				if _, err := io.ReadFull(file, data); err != nil {
+					return nil, err
+				}
+
+				entry, err = unmarshalAndVerifyEntry(data)
+				if err != nil {
+					return nil, err
+				}
+				return entry, nil
+			}
+			return nil, err
+		}
+
+		//Get current offset
+		offset, err = file.Seek(0, io.SeekCurrent)
+		previousSize = size
+
+		if err != nil {
+			return nil, err
+		}
+
+		//Skip to the next entry
+		if _, err := file.Seek(int64(size), io.SeekCurrent); err != nil {
+			return nil, err
+		}
+	}
+}
