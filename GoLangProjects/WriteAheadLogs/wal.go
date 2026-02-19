@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log"
 	"os"
@@ -208,3 +209,61 @@ func (wal *WAL) getLastEntryInLog() (*WAL_Entry, error) {
 		}
 	}
 }
+
+// WriteEntry writes an entry to the WAL
+func (wal *WAL) WriteEntry(data []byte) error {
+	return wal.writeEntry(data, false)
+}
+
+func (wal *WAL) writeEntry(data []byte, isCheckpoint bool) error {
+	wal.lock.Lock()
+	defer wal.lock.Unlock()
+
+	if err := wal.rotateLogIfNeeded(); err != nil {
+		return err
+	}
+
+	wal.lastSequenceNo++
+	entry := &WAL_Entry{
+		LogSequenceNumber: wal.lastSequenceNo,
+		Data:              data,
+		CRC:               crc32.ChecksumIEEE(append(data, byte(wal.lastSequenceNo))),
+	}
+
+	if isCheckpoint {
+		if err := wal.Sync(); err != nil {
+			return fmt.Errorf("could not create checkpoint, error while syncing: %v", err)
+		}
+		entry.IsCheckpoint = &isCheckpoint
+	}
+	return wal.writeEntryToBuffer(entry)
+}
+
+func (wal *WAL) writeEntryToBuffer(entry *WAL_Entry) error {
+	marshaledEntry := MustMarshal(entry)
+	size := int32(len(marshaledEntry))
+	if err := binary.Write(wal.bufWriter, binary.LittleEndian, size); err != nil {
+		return err
+	}
+	_, err := wal.bufWriter.Write(marshaledEntry)
+	return err
+}
+
+func (wal *WAL) CreateCheckpoint(data []byte) error {
+	return wal.writeEntry(data, true)
+}
+
+
+// func (wal *WAL) rotateLogIfNeeded() error {
+// 	fileInfo, err := wal.currentSegment.Stat()
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	if fileInfo.Size() + int64(wal.bufWriter.Buffered()) >= wal.maxFileSize {
+// 		if err := wal.rotateLog(); err != nil {
+// 			return err
+// 		}
+// 	}
+// 	return nil
+// }
