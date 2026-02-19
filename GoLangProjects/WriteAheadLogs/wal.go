@@ -8,8 +8,11 @@ import (
 	"hash/crc32"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -253,17 +256,84 @@ func (wal *WAL) CreateCheckpoint(data []byte) error {
 	return wal.writeEntry(data, true)
 }
 
-
 func (wal *WAL) rotateLogIfNeeded() error {
 	fileInfo, err := wal.currentSegment.Stat()
 	if err != nil {
 		return err
 	}
 
-	if fileInfo.Size() + int64(wal.bufWriter.Buffered()) >= wal.maxFileSize {
+	if fileInfo.Size()+int64(wal.bufWriter.Buffered()) >= wal.maxFileSize {
 		if err := wal.rotateLog(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (wal *WAL) rotateLog() error {
+	if err := wal.Sync(); err != nil {
+		return err
+	}
+	if err := wal.currentSegment.Close(); err != nil {
+		return err
+	}
+	wal.currentSegmentIndex++
+	if wal.currentSegmentIndex >= wal.maxSegments {
+		if err := wal.deleteOldestSegment(); err != nil {
+			return err
+		}
+	}
+	newFile, err := createSegmentFile(wal.directory, wal.currentSegmentIndex)
+	if err != nil {
+		return err
+	}
+
+	wal.currentSegment = newFile
+	wal.bufWriter = bufio.NewWriter(newFile)
+
+	return nil
+}
+
+// remove the oldest log file
+func (wal *WAL) deleteOldestSegment() error {
+	files, err := filepath.Glob(filepath.Join(wal.directory, segementPrefix+"*"))
+	if err != nil {
+		return err
+	}
+
+	var oldestSegementFilePath string
+	if len(files) > 0 {
+		//Find the oldest segment ID
+		oldestSegementFilePath, err = wal.findOldestSegmentFile(files)
+		if err != nil {
+			return err
+		}
+	} else {
+		return nil
+	}
+
+	//Delete the oldest segment file
+	if err := os.Remove(oldestSegementFilePath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (wal *WAL) findOldestSegmentFile(files []string) (string, error) {
+	var oldestSegementFilePath string
+	oldestSegmentID := math.MaxInt64
+	for _, file := range files {
+		//Get the segment index from the file name
+		segmentIndex, err := strconv.Atoi(strings.TrimPrefix(file,
+			filepath.Join(wal.directory, segementPrefix)))
+
+		if err != nil {
+			return "", err
+		}
+		if segmentIndex < oldestSegmentID {
+			oldestSegmentID = segmentIndex
+			oldestSegementFilePath = file
+		}
+	}
+	return oldestSegementFilePath, nil
 }
