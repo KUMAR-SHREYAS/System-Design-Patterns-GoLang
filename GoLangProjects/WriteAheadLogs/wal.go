@@ -254,16 +254,16 @@ func (wal *WAL) CreateCheckpoint(data []byte) error {
 }
 
 
-// func (wal *WAL) rotateLogIfNeeded() error {
-// 	fileInfo, err := wal.currentSegment.Stat()
-// 	if err != nil {
-// 		return err
-// 	}
+func (wal *WAL) rotateLogIfNeeded() error {
+	fileInfo, err := wal.currentSegment.Stat()
+	if err != nil {
+		return err
+	}
 
-// 	if fileInfo.Size() + int64(wal.bufWriter.Buffered()) >= wal.maxFileSize {
-// 		if err := wal.rotateLog(); err != nil {
-// 			return err
-// 		}
-// 	}
-// 	return nil
-// }
+	if fileInfo.Size() + int64(wal.bufWriter.Buffered()) >= wal.maxFileSize {
+		if err := wal.rotateLog(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
