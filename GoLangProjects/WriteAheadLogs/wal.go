@@ -15,10 +15,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 )
 
 const (
-	syncInterval   = 200 * time.Millisecond
+	syncInterval  = 200 * time.Millisecond
 	segmentPrefix = "segment-"
 )
 
@@ -44,9 +46,9 @@ type WAL struct {
 // enableFsync enables fsync on the log segment file every time the log flushes.
 // maxFileSize is the maximum size of a log segment file in bytes.
 // maxSegments is the maximum number of log segment files to keep.
-func OpenWal(directory string, enableFsync bool, maxFileSize int64, maxSegments int) (*WAL, error) {
+func OpenWAL(directory string, enableFsync bool, maxFileSize int64, maxSegments int) (*WAL, error) {
 	//Create the directory if it doesn't exist
-	if err := os.Mkdir(directory, 0755); err != nil {
+	if err := os.MkdirAll(directory, 0755); err != nil {
 		return nil, err
 	}
 
@@ -301,10 +303,10 @@ func (wal *WAL) deleteOldestSegment() error {
 		return err
 	}
 
-	var oldestSegementFilePath string
+	var oldestSegmentFilePath string
 	if len(files) > 0 {
 		//Find the oldest segment ID
-		oldestSegementFilePath, err = wal.findOldestSegmentFile(files)
+		oldestSegmentFilePath, err = wal.findOldestSegmentFile(files)
 		if err != nil {
 			return err
 		}
@@ -313,14 +315,14 @@ func (wal *WAL) deleteOldestSegment() error {
 	}
 
 	//Delete the oldest segment file
-	if err := os.Remove(oldestSegementFilePath); err != nil {
+	if err := os.Remove(oldestSegmentFilePath); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (wal *WAL) findOldestSegmentFile(files []string) (string, error) {
-	var oldestSegementFilePath string
+	var oldestSegmentFilePath string
 	oldestSegmentID := math.MaxInt64
 	for _, file := range files {
 		//Get the segment index from the file name
@@ -332,10 +334,10 @@ func (wal *WAL) findOldestSegmentFile(files []string) (string, error) {
 		}
 		if segmentIndex < oldestSegmentID {
 			oldestSegmentID = segmentIndex
-			oldestSegementFilePath = file
+			oldestSegmentFilePath = file
 		}
 	}
-	return oldestSegementFilePath, nil
+	return oldestSegmentFilePath, nil
 }
 
 // Close the WAL file. It also calls Sync() on the WAL.
@@ -373,7 +375,7 @@ func (wal *WAL) ReadAll(readFromCheckpoint bool) ([]*WAL_Entry, error) {
 // found, it will return an empty slice.)
 func (wal *WAL) ReadAllFromOffset(offset int, readFromCheckpoint bool) ([]*WAL_Entry, error) {
 	//Get the list of log segment files in the directory
-	files, err := filepath.Glob(filepath.Join(wal.directory, segmentPrefix +"*"))
+	files, err := filepath.Glob(filepath.Join(wal.directory, segmentPrefix+"*"))
 	if err != nil {
 		return nil, err
 	}
@@ -408,14 +410,13 @@ func (wal *WAL) ReadAllFromOffset(offset int, readFromCheckpoint bool) ([]*WAL_E
 	return entries, nil
 }
 
-
 func readAllEntriesFromFile(file *os.File, readFromCheckpoint bool) ([]*WAL_Entry, uint64, error) {
 	var entries []*WAL_Entry
 	checkpointLogSequenceNo := uint64(0)
 	for {
 		var size int32
-		if err:= binary.Read(file, binary.LittleEndian, &size); err != nil {
-			if err ==io.EOF {
+		if err := binary.Read(file, binary.LittleEndian, &size); err != nil {
+			if err == io.EOF {
 				break
 			}
 			return entries, checkpointLogSequenceNo, err
@@ -437,9 +438,125 @@ func readAllEntriesFromFile(file *os.File, readFromCheckpoint bool) ([]*WAL_Entr
 		if entry.IsCheckpoint != nil && entry.GetIsCheckpoint() {
 			checkpointLogSequenceNo = entry.GetLogSequenceNumber()
 			//Empty the entire slice
-			entries  = entries[:0]
+			entries = entries[:0]
 		}
-		entries  = append(entries, entry)
+		entries = append(entries, entry)
 	}
 	return entries, checkpointLogSequenceNo, nil
+}
+
+// Repairs a corrupted WAL by scanning the WAL from the start and reading all
+// entries until a corrupted entry is encountered, at which point the file is
+// truncated. The function returns the entries that were read before the
+// corruption and overwrites the existing WAL file with the repaired entries.
+// It checks the CRC of each entry to verify if it is corrupted, and if the CRC
+// is invalid, the file is truncated at that point.
+func (wal *WAL) Repair() ([]*WAL_Entry, error) {
+	files, err := filepath.Glob(filepath.Join(wal.directory, segmentPrefix+"*"))
+	if err != nil {
+		return nil, err
+	}
+	var lastSegmentID int
+	if len(files) > 0 {
+		//Find the last segment ID
+		lastSegmentID, err = findLastSegmentIndexinFiles(files)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		log.Fatalf("No log segments found, nothing to repair.")
+	}
+	// Open the last log segment file
+	filePath := filepath.Join(wal.directory, fmt.Sprintf("%s%d", segmentPrefix, lastSegmentID))
+	file, err := os.OpenFile(filePath, os.O_RDONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	//Seek to the beginning of the file
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
+	var entries []*WAL_Entry
+
+	for {
+		// Read the size of the next entry.
+		var size int32
+		if err := binary.Read(file, binary.LittleEndian, &size); err != nil {
+			if err == io.EOF {
+				// End of file reached, no corruption found.
+				return entries, nil
+			}
+			log.Printf("Error while reading entry size")
+			//Truncate the file at this point.
+			if err := wal.replaceWithFixedFile(entries); err != nil {
+				return entries, err
+			}
+			return nil, nil
+		}
+		// Read the entry data.
+		data := make([]byte, size)
+		if _, err := io.ReadFull(file, data); err != nil {
+			// Truncate the file at this point
+			if err := wal.replaceWithFixedFile(entries); err != nil {
+				return entries, err
+			}
+			return entries, nil
+		}
+
+		// Deserialize the entry
+		var entry WAL_Entry
+		if err := proto.Unmarshal(data, &entry); err != nil {
+			if err := wal.replaceWithFixedFile(entries); err != nil {
+				return entries, err
+			}
+			return entries, nil
+		}
+
+		if !verifyCRC(&entry) {
+			log.Printf("CRC mismatch: data may be corrupted")
+			// Truncate the file at this point
+			if err := wal.replaceWithFixedFile(entries); err != nil {
+				return entries, err
+			}
+		}
+		// Add the entry to the slice.
+		entries = append(entries, &entry)
+	}
+}
+
+// replaceWithFixedFile replaces the existing WAL file with the given entries
+// atomically.
+func (wal *WAL) replaceWithFixedFile(entries []*WAL_Entry) error {
+	// Create a temporary file to make the operation look atomic
+	tempFilePath := fmt.Sprintf("%s.tmp", wal.currentSegment.Name())
+	tempFile, err := os.OpenFile(tempFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	//Write the entries to the temporary file
+	for _, entry := range entries {
+		marshaledEntry := MustMarshal(entry)
+		size := int32(len(marshaledEntry))
+		if err := binary.Write(tempFile, binary.LittleEndian, size); err != nil {
+			return err
+		}
+		_, err := tempFile.Write(marshaledEntry)
+		if err != nil {
+			return err
+		}
+	}
+
+	//Close the temporary file
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+	// Rename the temporary file to the original file name
+	if err := os.Rename(tempFilePath, wal.currentSegment.Name()); err != nil {
+		return err
+	}
+	return nil
 }
